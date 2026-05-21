@@ -21,7 +21,8 @@ setup(
     license='MIT',
     entry_points={
         'console_scripts': [
-            'gim8108_control_gui = gim8108_gui.control_gui:main',
+            'gim8108_control_gui  = gim8108_gui.control_gui:main',
+            'gim8108_motion_gui   = gim8108_gui.motion_gui:main',
         ],
     },
 )
