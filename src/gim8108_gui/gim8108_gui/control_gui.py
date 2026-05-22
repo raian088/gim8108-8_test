@@ -145,9 +145,8 @@ QSplitter::handle { background:#2e2e2e; width:2px; }
 
 QScrollBar:vertical   { background:#1e1e1e; width:7px; margin:0; }
 QScrollBar:horizontal { background:#1e1e1e; height:7px; margin:0; }
-QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
-    background:#404040; border-radius:3px; min-length:20px;
-}
+QScrollBar::handle:vertical   { background:#404040; border-radius:3px; min-height:20px; }
+QScrollBar::handle:horizontal { background:#404040; border-radius:3px; min-width:20px;  }
 QScrollBar::handle:vertical:hover,
 QScrollBar::handle:horizontal:hover { background:#606060; }
 QScrollBar::add-line, QScrollBar::sub-line { height:0; width:0; }
@@ -397,20 +396,21 @@ class AddMotorDialog(QDialog):
         try:
             result = subprocess.run(
                 ['python3', '-c',
-                 'import odrive, sys\n'
                  'devs = []\n'
                  'try:\n'
-                 '  import usb.core\n'
-                 '  for d in usb.core.find(idVendor=0x1209,idProduct=0x0d32,find_all=True):\n'
-                 '    try: devs.append(usb.util.get_string(d,d.iSerialNumber))\n'
-                 '    except: pass\n'
-                 'except Exception:\n'
-                 '  pass\n'
+                 '  import usb.core, usb.util\n'
+                 '  for d in usb.core.find(idVendor=0x1209, idProduct=0x0d32, find_all=True) or []:\n'
+                 '    try:\n'
+                 '      sn = usb.util.get_string(d, d.iSerialNumber)\n'
+                 '      int(sn, 16)  # only accept valid hex strings\n'
+                 '      devs.append(sn.upper())\n'
+                 '    except Exception: pass\n'
+                 'except Exception: pass\n'
                  'if not devs:\n'
                  '  import odrive\n'
                  '  odrv = odrive.find_any(timeout=3)\n'
                  '  devs.append(hex(odrv.serial_number)[2:].upper())\n'
-                 'print("\\n".join(devs))'],
+                 'print("\\n".join(devs))\n'],
                 capture_output=True, text=True, timeout=12
             )
             serials = [s.strip() for s in result.stdout.splitlines() if s.strip()]

@@ -119,7 +119,13 @@ class GIM8108UsbNode(Node):
         timeout = self.get_parameter('connect_timeout').value
         axis_num = self.get_parameter('axis').value
         sn_str = self.get_parameter('serial_number').value
-        sn = int(sn_str, 16) if sn_str else None
+        sn = None
+        if sn_str:
+            try:
+                sn = int(sn_str, 16)
+            except ValueError:
+                self.get_logger().warn(
+                    f'serial_number "{sn_str}" is not valid hex — falling back to auto-detect')
         self.get_logger().info(
             f'Waiting for ODrive (timeout={timeout}s, serial={sn_str or "auto"}) — '
             'make sure: usbipd attach --wsl --busid <BUSID>'
