@@ -50,6 +50,7 @@ class GIM8108UsbNode(Node):
         self.declare_parameter('traj_decel',      5.0)
         self.declare_parameter('gear_ratio',      8.0)
         self.declare_parameter('home_on_connect', True)
+        self.declare_parameter('serial_number',   '')   # hex string, e.g. '3060649C3539' — blank = auto
 
         self.odrv = None
         self.axis = None
@@ -116,12 +117,14 @@ class GIM8108UsbNode(Node):
             return
         timeout = self.get_parameter('connect_timeout').value
         axis_num = self.get_parameter('axis').value
+        sn_str = self.get_parameter('serial_number').value
+        sn = int(sn_str, 16) if sn_str else None
         self.get_logger().info(
-            f'Waiting for ODrive (timeout={timeout}s) — '
+            f'Waiting for ODrive (timeout={timeout}s, serial={sn_str or "auto"}) — '
             'make sure: usbipd attach --wsl --busid <BUSID>'
         )
         try:
-            odrv = odrive.find_any(timeout=timeout)
+            odrv = odrive.find_any(timeout=timeout, serial_number=sn)
         except Exception as exc:
             self.get_logger().error(f'ODrive connection failed: {exc}')
             return
