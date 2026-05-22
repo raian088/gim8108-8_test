@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-package_name = 'gim8108_gui'
+package_name = 'gim8108_motion'
 
 setup(
     name=package_name,
@@ -17,11 +17,11 @@ setup(
     zip_safe=True,
     maintainer='user',
     maintainer_email='user@example.com',
-    description='PyQt5 GUI for GIM8108-8 motor control',
+    description='Motion recorder and player GUI for GIM8108-8 motor',
     license='MIT',
     entry_points={
         'console_scripts': [
-            'gim8108_control_gui = gim8108_gui.control_gui:main',
+            'gim8108_motion_gui = gim8108_motion.motion_gui:main',
         ],
     },
 )
