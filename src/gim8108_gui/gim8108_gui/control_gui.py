@@ -1547,9 +1547,13 @@ def main(args=None):
     threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
 
     window = MultiMotorGUI(node)
-    window.add_default_motor()
-    window.list_panel._load_and_relaunch()   # restore motors from previous session
     window.show()
+    # Defer ROS2 subscription creation until after the Qt event loop starts,
+    # to avoid race conditions with the rclpy.spin() background thread.
+    QTimer.singleShot(0, lambda: (
+        window.add_default_motor(),
+        window.list_panel._load_and_relaunch(),
+    ))
 
     exit_code = app.exec_()
 

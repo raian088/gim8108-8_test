@@ -55,6 +55,7 @@ class GIM8108UsbNode(Node):
 
         self.odrv = None
         self.axis = None
+        self._usb_find_path = None   # set in _connect_loop if usb_path param given
         self._lock = threading.Lock()
         self._traj_vel   = self.get_parameter('traj_vel').value
         self._traj_accel = self.get_parameter('traj_accel').value
@@ -124,19 +125,15 @@ class GIM8108UsbNode(Node):
         sn = None
 
         if usb_path:
-            # Resolve USB bus:address → serial number via pyusb
+            # Pass USB bus:address directly to odrive as a path filter.
+            # Format: 'usb:bus:address' e.g. 'usb:1:17' (decimal)
             try:
-                import usb.core
                 bus, addr = (int(x) for x in usb_path.split(':'))
-                d = usb.core.find(idVendor=0x1209, idProduct=0x0d32, bus=bus, address=addr)
-                if d is not None:
-                    raw = d.serial_number
-                    sn = int(raw, 16)
-                    self.get_logger().info(f'USB {usb_path} → serial {raw.upper()}')
-                else:
-                    self.get_logger().warn(f'No ODrive found at USB {usb_path} — auto-detecting')
+                self._usb_find_path = f'usb:{bus}:{addr}'
+                self.get_logger().info(f'USB path filter: {self._usb_find_path}')
             except Exception as exc:
-                self.get_logger().warn(f'USB path lookup failed ({exc}) — auto-detecting')
+                self.get_logger().warn(f'USB path parse failed ({exc}) — auto-detecting')
+                self._usb_find_path = None
         elif sn_str:
             try:
                 sn = int(sn_str, 16)
@@ -150,7 +147,10 @@ class GIM8108UsbNode(Node):
             'make sure: usbipd attach --wsl --busid <BUSID>'
         )
         try:
-            odrv = odrive.find_any(timeout=timeout, serial_number=sn)
+            if self._usb_find_path:
+                odrv = odrive.find_any(timeout=timeout, path=self._usb_find_path)
+            else:
+                odrv = odrive.find_any(timeout=timeout, serial_number=sn)
         except Exception as exc:
             self.get_logger().error(f'ODrive connection failed: {exc}')
             return
