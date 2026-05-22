@@ -51,6 +51,7 @@ class GIM8108UsbNode(Node):
         self.declare_parameter('gear_ratio',      8.0)
         self.declare_parameter('home_on_connect', True)
         self.declare_parameter('serial_number',   '')   # hex string, e.g. '3060649C3539' — blank = auto
+        self.declare_parameter('usb_path',        '')   # 'bus:address' e.g. '001:017' from lsusb — overrides serial_number
 
         self.odrv = None
         self.axis = None
@@ -118,16 +119,34 @@ class GIM8108UsbNode(Node):
             return
         timeout = self.get_parameter('connect_timeout').value
         axis_num = self.get_parameter('axis').value
-        sn_str = self.get_parameter('serial_number').value
+        usb_path = self.get_parameter('usb_path').value      # e.g. '001:017'
+        sn_str   = self.get_parameter('serial_number').value  # e.g. '3060649C3539'
         sn = None
-        if sn_str:
+
+        if usb_path:
+            # Resolve USB bus:address → serial number via pyusb
+            try:
+                import usb.core
+                bus, addr = (int(x) for x in usb_path.split(':'))
+                d = usb.core.find(idVendor=0x1209, idProduct=0x0d32, bus=bus, address=addr)
+                if d is not None:
+                    raw = d.serial_number
+                    sn = int(raw, 16)
+                    self.get_logger().info(f'USB {usb_path} → serial {raw.upper()}')
+                else:
+                    self.get_logger().warn(f'No ODrive found at USB {usb_path} — auto-detecting')
+            except Exception as exc:
+                self.get_logger().warn(f'USB path lookup failed ({exc}) — auto-detecting')
+        elif sn_str:
             try:
                 sn = int(sn_str, 16)
             except ValueError:
                 self.get_logger().warn(
                     f'serial_number "{sn_str}" is not valid hex — falling back to auto-detect')
+
+        ident = usb_path or sn_str or 'auto'
         self.get_logger().info(
-            f'Waiting for ODrive (timeout={timeout}s, serial={sn_str or "auto"}) — '
+            f'Waiting for ODrive (timeout={timeout}s, id={ident}) — '
             'make sure: usbipd attach --wsl --busid <BUSID>'
         )
         try:

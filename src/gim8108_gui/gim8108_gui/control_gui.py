@@ -6,6 +6,7 @@ Right : selected motor — Motor Control tab | Motion tab
 
 import json
 import math
+import re
 import subprocess
 import sys
 import threading
@@ -393,43 +394,51 @@ class AddMotorDialog(QDialog):
         threading.Thread(target=self._do_scan, daemon=True).start()
 
     def _do_scan(self):
+        # Output format per line: "BUS:ADDR|SERIAL"  (serial empty if unreadable)
+        script = (
+            'import usb.core\n'
+            'devs = list(usb.core.find(idVendor=0x1209, idProduct=0x0d32, find_all=True) or [])\n'
+            'for d in devs:\n'
+            '  try:\n'
+            '    sn = ""\n'
+            '    try:\n'
+            '      raw = d.serial_number\n'
+            '      int(raw, 16)  # only valid hex\n'
+            '      sn = raw.upper()\n'
+            '    except Exception: pass\n'
+            '    print(f"{d.bus:03d}:{d.address:03d}|{sn}")\n'
+            '  except Exception: pass\n'
+        )
         try:
             result = subprocess.run(
-                ['python3', '-c',
-                 'devs = []\n'
-                 'try:\n'
-                 '  import usb.core, usb.util\n'
-                 '  for d in usb.core.find(idVendor=0x1209, idProduct=0x0d32, find_all=True) or []:\n'
-                 '    try:\n'
-                 '      sn = usb.util.get_string(d, d.iSerialNumber)\n'
-                 '      int(sn, 16)  # only accept valid hex strings\n'
-                 '      devs.append(sn.upper())\n'
-                 '    except Exception: pass\n'
-                 'except Exception: pass\n'
-                 'if not devs:\n'
-                 '  import odrive\n'
-                 '  odrv = odrive.find_any(timeout=3)\n'
-                 '  devs.append(hex(odrv.serial_number)[2:].upper())\n'
-                 'print("\\n".join(devs))\n'],
-                capture_output=True, text=True, timeout=12
+                ['python3', '-c', script],
+                capture_output=True, text=True, timeout=10
             )
-            serials = [s.strip() for s in result.stdout.splitlines() if s.strip()]
+            entries = [s.strip() for s in result.stdout.splitlines() if s.strip()]
         except Exception:
-            serials = []
-        self._scan_done.emit(serials)
+            entries = []
+        self._scan_done.emit(entries)
 
-    def _on_scan_done(self, serials: list):
+    def _on_scan_done(self, entries: list):
         self.btn_scan.setEnabled(True)
         self.btn_scan.setText('🔍 Scan')
-        if not serials:
+        if not entries:
             QMessageBox.information(self, 'Not found',
-                'No ODrive detected.\nMake sure it is connected:\n  usbipd attach --wsl --busid <BUSID>')
+                'No ODrive detected.\n'
+                'Make sure it is attached:\n'
+                '  usbipd attach --wsl --busid <BUSID>\n\n'
+                'Run  lsusb  to confirm ID 1209:0d32 appears.')
             return
-        current = self.serial_combo.lineEdit().text()
         self.serial_combo.clear()
-        self.serial_combo.addItems(serials)
-        if current and current not in serials:
-            self.serial_combo.lineEdit().setText(current)
+        for entry in entries:
+            parts = entry.split('|', 1)
+            usb_addr = parts[0]              # '001:017'
+            sn       = parts[1] if len(parts) > 1 else ''
+            bus, dev = usb_addr.split(':')
+            label = f'Bus {bus}  Dev {dev}'
+            if sn:
+                label += f'  │  SN: {sn}'
+            self.serial_combo.addItem(label, {'usb_path': usb_addr, 'serial': sn})
 
     @property
     def motor_name(self): return self.name_edit.text().strip() or 'Motor'
@@ -437,8 +446,28 @@ class AddMotorDialog(QDialog):
     def axis(self): return self.axis_combo.currentIndex()
     @property
     def gear_ratio(self): return self.gear_spin.value()
+
     @property
-    def serial_number(self): return self.serial_combo.currentText().strip()
+    def usb_path(self) -> str:
+        """Return 'bus:addr' e.g. '001:017' from scan selection or manual entry."""
+        data = self.serial_combo.currentData()
+        if data and data.get('usb_path'):
+            return data['usb_path']
+        text = self.serial_combo.currentText().strip()
+        if re.match(r'^\d{3}:\d{3}$', text):
+            return text
+        return ''
+
+    @property
+    def serial_number(self) -> str:
+        """Return hex serial string from scan selection or manual entry."""
+        data = self.serial_combo.currentData()
+        if data and data.get('serial'):
+            return data['serial']
+        text = self.serial_combo.currentText().strip()
+        if not re.match(r'^\d{3}:\d{3}$', text):
+            return text  # manual hex serial
+        return ''
 
 
 # ── Motor card (left panel) ───────────────────────────────────────────────────
@@ -602,7 +631,9 @@ class MotorListPanel(QWidget):
             '-p', f'gear_ratio:={gr}',
             '-p', 'home_on_connect:=true',
         ]
-        if dlg.serial_number:
+        if dlg.usb_path:
+            cmd += ['-p', f'usb_path:={dlg.usb_path}']
+        elif dlg.serial_number:
             cmd += ['-p', f'serial_number:={dlg.serial_number}']
         try:
             proc = subprocess.Popen(cmd)
