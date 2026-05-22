@@ -43,8 +43,9 @@ CTRL_TORQUE   = 1
 CTRL_VELOCITY = 2
 CTRL_POSITION = 3
 
-MOTION_DIR  = Path.home() / 'gim8108_motions'
-DEFAULT_NS  = '/gim8108_motor_node'   # backward-compatible with start.launch.py
+MOTION_DIR   = Path.home() / 'gim8108_motions'
+DEFAULT_NS   = '/gim8108_motor_node'   # backward-compatible with start.launch.py
+MOTORS_CONFIG = Path.home() / '.config' / 'gim8108' / 'motors.json'
 
 # ── Dark stylesheet ───────────────────────────────────────────────────────────
 
@@ -186,6 +187,12 @@ class MotorChannel:
     topic_ns: str                    # e.g. '/gim8108_motor_node' or '/motor_1/gim8108_motor_node'
     process: Optional[Any] = None   # subprocess.Popen for GUI-launched nodes
 
+    # Launch parameters (persisted to config)
+    param_axis: int = 0
+    param_gear_ratio: float = 8.0
+    param_usb_path: str = ''
+    param_serial: str = ''
+
     # State
     pos_deg: float = 0.0
     pos_abs_deg: float = 0.0
@@ -196,7 +203,11 @@ class MotorChannel:
     serial_number: str = ''
     _cfg: dict = field(default_factory=dict)
 
-    # Callbacks (set by the detail panel)
+    # Callbacks — card (always active, set by add_card, never overwritten)
+    on_card_state: Any = None
+    on_card_connected: Any = None
+
+    # Callbacks — detail panel (only when motor is selected)
     on_state: Any = None
     on_connected: Any = None
     on_calib: Any = None
@@ -319,15 +330,18 @@ class MultiGuiNode(Node):
             ch.vel_out_ts = msg.velocity[0] / (2.0 * math.pi)
         if msg.effort:
             ch.current_a = msg.effort[0]
+        if ch.on_card_state: ch.on_card_state()
         if ch.on_state: ch.on_state()
 
     def _on_voltage(self, msg: Float64, ch: MotorChannel):
         ch.voltage_v = msg.data
+        if ch.on_card_state: ch.on_card_state()
         if ch.on_state: ch.on_state()
 
     def _on_connected(self, msg: Bool, ch: MotorChannel):
         if ch.is_connected != msg.data:
             ch.is_connected = msg.data
+            if ch.on_card_connected: ch.on_card_connected()
             if ch.on_connected: ch.on_connected()
 
     def _on_calib(self, msg: String, ch: MotorChannel):
@@ -551,6 +565,8 @@ class MotorListPanel(QWidget):
         self.node = node
         self.cards: Dict[str, MotorCard] = {}
         self._selected_ns: Optional[str] = None
+        self._next_motor_idx = 1
+        MOTORS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         self.setFixedWidth(220)
         self._build()
 
@@ -591,6 +607,9 @@ class MotorListPanel(QWidget):
         card = MotorCard(ch)
         card.clicked.connect(lambda ns=ch.topic_ns: self._select(ns))
         card.remove_requested.connect(lambda ns=ch.topic_ns: self._remove_motor(ns))
+        # Card callbacks — always active, never overwritten by detail panel
+        ch.on_card_state     = lambda c=card: c.refresh()
+        ch.on_card_connected = lambda c=card: c.refresh()
         self.cards[ch.topic_ns] = card
         # Insert before the stretch
         idx = self._card_layout.count() - 1
@@ -611,45 +630,48 @@ class MotorListPanel(QWidget):
             self.cards[ns].refresh()
 
     def _on_add(self):
-        dlg = AddMotorDialog(self, len(self.cards))
+        dlg = AddMotorDialog(self, self._next_motor_idx)
         if dlg.exec_() != QDialog.Accepted:
             return
 
-        idx   = len(self.cards)
-        rname = f'motor_{idx}'
-        ns    = f'/motor_{idx}/gim8108_motor_node'
-        name  = dlg.motor_name
-        axis  = dlg.axis
-        gr    = dlg.gear_ratio
+        idx  = self._next_motor_idx
+        self._next_motor_idx += 1
+        ns   = f'/motor_{idx}/gim8108_motor_node'
+        name = dlg.motor_name
+        axis = dlg.axis
+        gr   = dlg.gear_ratio
+        usb  = dlg.usb_path
+        sn   = dlg.serial_number
 
-        # Launch motor node in new namespace
+        proc = self._launch_node(ns, axis, gr, usb, sn)
+        if proc is None:
+            return
+
+        ch = MotorChannel(name=name, topic_ns=ns, process=proc,
+                          param_axis=axis, param_gear_ratio=gr,
+                          param_usb_path=usb, param_serial=sn)
+        self.node.add_channel(ch)
+        self.add_card(ch)
+        self._save_config()
+
+    def _launch_node(self, ns: str, axis: int, gr: float, usb_path: str, serial: str):
         cmd = [
             'ros2', 'run', 'gim8108_driver', 'gim8108_motor_node_usb',
             '--ros-args',
-            '--remap', f'__ns:=/motor_{idx}',
+            '--remap', f'__ns:={ns.replace("/gim8108_motor_node", "")}',
             '-p', f'axis:={axis}',
             '-p', f'gear_ratio:={gr}',
             '-p', 'home_on_connect:=true',
         ]
-        if dlg.usb_path:
-            cmd += ['-p', f'usb_path:={dlg.usb_path}']
-        elif dlg.serial_number:
-            cmd += ['-p', f'serial_number:={dlg.serial_number}']
+        if usb_path:
+            cmd += ['-p', f'usb_path:={usb_path}']
+        elif serial:
+            cmd += ['-p', f'serial_number:={serial}']
         try:
-            proc = subprocess.Popen(cmd)
+            return subprocess.Popen(cmd)
         except FileNotFoundError:
             QMessageBox.critical(self, 'Error', 'ros2 not found. Make sure ROS2 is sourced.')
-            return
-
-        ch = MotorChannel(name=name, topic_ns=ns, process=proc)
-        self.node.add_channel(ch)
-        self.add_card(ch)
-
-        # Wire card refresh to the channel's state callbacks
-        card = self.cards[ns]
-        ch.on_connected = lambda c=card, n=ns: (c.refresh(), self.motor_selected.emit(n)
-                                                 if self._selected_ns == n else None)
-        ch.on_state = lambda c=card: c.refresh()
+            return None
 
     def _remove_motor(self, ns: str):
         ch = self.node.channels.get(ns)
@@ -662,11 +684,13 @@ class MotorListPanel(QWidget):
             return
 
         # Clear callbacks before teardown to avoid use-after-free
-        ch.on_state = None
-        ch.on_connected = None
-        ch.on_calib = None
-        ch.on_config = None
-        ch.on_serial = None
+        ch.on_card_state     = None
+        ch.on_card_connected = None
+        ch.on_state          = None
+        ch.on_connected      = None
+        ch.on_calib          = None
+        ch.on_config         = None
+        ch.on_serial         = None
 
         if ch.process:
             try:
@@ -687,6 +711,56 @@ class MotorListPanel(QWidget):
                 self._select(next(iter(self.cards)))
             else:
                 self.motor_selected.emit('')
+
+        self._save_config()
+
+    def _save_config(self):
+        """Save user-added motors (not Motor 0) to disk."""
+        saved = []
+        for ns, ch in self.node.channels.items():
+            if ns == DEFAULT_NS:
+                continue  # default motor is always added at startup
+            saved.append({
+                'name':       ch.name,
+                'topic_ns':   ns,
+                'axis':       ch.param_axis,
+                'gear_ratio': ch.param_gear_ratio,
+                'usb_path':   ch.param_usb_path,
+                'serial':     ch.param_serial,
+            })
+        try:
+            MOTORS_CONFIG.write_text(json.dumps(saved, indent=2))
+        except Exception:
+            pass
+
+    def _load_and_relaunch(self):
+        """Reload and relaunch motors saved from the previous session."""
+        if not MOTORS_CONFIG.exists():
+            return
+        try:
+            saved = json.loads(MOTORS_CONFIG.read_text())
+        except Exception:
+            return
+        for cfg in saved:
+            ns = cfg.get('topic_ns', '')
+            if not ns or ns == DEFAULT_NS or ns in self.node.channels:
+                continue
+            # Update index counter to avoid collision with new additions
+            m = re.search(r'/motor_(\d+)/', ns)
+            if m:
+                self._next_motor_idx = max(self._next_motor_idx, int(m.group(1)) + 1)
+            axis = cfg.get('axis', 0)
+            gr   = cfg.get('gear_ratio', 8.0)
+            usb  = cfg.get('usb_path', '')
+            sn   = cfg.get('serial', '')
+            proc = self._launch_node(ns, axis, gr, usb, sn)
+            if proc is None:
+                continue
+            ch = MotorChannel(name=cfg.get('name', 'Motor'), topic_ns=ns, process=proc,
+                              param_axis=axis, param_gear_ratio=gr,
+                              param_usb_path=usb, param_serial=sn)
+            self.node.add_channel(ch)
+            self.add_card(ch)
 
 
 # ── Motor Control detail panel ────────────────────────────────────────────────
@@ -733,6 +807,7 @@ class MotorDetailPanel(QWidget):
             self.ch.on_connected = None
             self.ch.on_calib     = None
             self.ch.on_config    = None
+            self.ch.on_serial    = None
         self.ch = ch
         if ch:
             ch.on_state     = self._sig_state.emit
@@ -740,6 +815,17 @@ class MotorDetailPanel(QWidget):
             ch.on_calib     = self._sig_calib.emit
             ch.on_config    = self._sig_config.emit
             ch.on_serial    = self._sig_serial.emit
+            self.lbl_motor_header.setText(f'  {ch.name}   {ch.topic_ns}')
+            self.lbl_motor_header.setStyleSheet(
+                'background:#202020; color:#cccccc; padding:7px 14px; '
+                'font-size:13px; font-weight:bold; border-bottom:1px solid #333;'
+            )
+        else:
+            self.lbl_motor_header.setText('  No motor selected')
+            self.lbl_motor_header.setStyleSheet(
+                'background:#202020; color:#555555; padding:7px 14px; '
+                'font-size:13px; border-bottom:1px solid #333;'
+            )
         self._refresh_connection()
         self._refresh_status()
 
@@ -749,6 +835,14 @@ class MotorDetailPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
+
+        self.lbl_motor_header = QLabel('  No motor selected')
+        self.lbl_motor_header.setStyleSheet(
+            'background:#202020; color:#555555; padding:7px 14px; '
+            'font-size:13px; font-weight:bold; border-bottom:1px solid #333;'
+        )
+        v.addWidget(self.lbl_motor_header)
+
         v.addWidget(self._make_status_bar())
         tabs = QTabWidget()
         tabs.addTab(self._make_control_tab(), 'Motor Control')
@@ -1429,17 +1523,7 @@ class MultiMotorGUI(QMainWindow):
     def add_default_motor(self, name: str = 'Motor 0', topic_ns: str = DEFAULT_NS):
         ch = MotorChannel(name=name, topic_ns=topic_ns)
         self.node.add_channel(ch)
-        self.list_panel.add_card(ch)
-
-        # Wire card refresh
-        card = self.list_panel.cards[topic_ns]
-        ch.on_connected = lambda c=card, ns=topic_ns: (
-            c.refresh(),
-            self._on_motor_selected(ns) if self.list_panel._selected_ns == ns else None
-        )
-        ch.on_state = lambda c=card: c.refresh()
-
-        # Wire detail panel (first motor selected by default)
+        self.list_panel.add_card(ch)   # card callbacks set inside add_card
         self.detail_panel.set_channel(ch)
 
     def _on_motor_selected(self, ns: str):
@@ -1464,6 +1548,7 @@ def main(args=None):
 
     window = MultiMotorGUI(node)
     window.add_default_motor()
+    window.list_panel._load_and_relaunch()   # restore motors from previous session
     window.show()
 
     exit_code = app.exec_()
