@@ -165,6 +165,18 @@ class MotionGUI(QMainWindow):
         grp = QGroupBox('Record')
         v = QVBoxLayout(grp)
 
+        # Free / Enable
+        hFree = QHBoxLayout()
+        self.btn_free = QPushButton('Free (Torque OFF)')
+        self.btn_free.setCheckable(True)
+        self.btn_free.setStyleSheet(
+            'QPushButton:checked{background:#e67e22;color:white;font-weight:bold;}'
+        )
+        self.btn_free.toggled.connect(self._on_free_toggled)
+        hFree.addWidget(self.btn_free)
+        hFree.addStretch()
+        v.addLayout(hFree)
+
         # Hz
         hHz = QHBoxLayout()
         hHz.addWidget(QLabel('Capture Hz:'))
@@ -263,6 +275,13 @@ class MotionGUI(QMainWindow):
 
     # ── Record logic ──────────────────────────────────────────────────────────
 
+    def _on_free_toggled(self, checked: bool):
+        self.node.call_enable(not checked)
+        if checked:
+            self.btn_free.setText('Free (Torque OFF)  ← 手で動かせます')
+        else:
+            self.btn_free.setText('Free (Torque OFF)')
+
     def _start_record(self):
         self._recorded = []
         self._record_hz = self.cmb_hz.currentData()
@@ -280,6 +299,12 @@ class MotionGUI(QMainWindow):
         self._record_timer.stop()
         self.btn_rec.setEnabled(True)
         self.btn_stop_rec.setEnabled(False)
+        # フリーモードを解除してモータを再有効化
+        self.btn_free.blockSignals(True)
+        self.btn_free.setChecked(False)
+        self.btn_free.setText('Free (Torque OFF)')
+        self.btn_free.blockSignals(False)
+        self.node.call_enable(True)
         n = len(self._recorded)
         self.lbl_frames.setText(
             f'Done: {n} frames  ({n / self._record_hz:.1f} s)  — press Save to keep'

@@ -12,13 +12,21 @@ Switch to socketcan by setting can_bustype:='socketcan' and can_channel:='can0'.
 import math
 import struct
 import threading
+import time
 
 import can
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64, Int32
 from std_srvs.srv import SetBool, Trigger
+
+_QOS_LATCHED = QoSProfile(
+    depth=1,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=ReliabilityPolicy.RELIABLE,
+)
 
 # ── Axis states ──────────────────────────────────────────────────────────────
 AXIS_STATE_IDLE = 1
@@ -76,6 +84,7 @@ class GIM8108MotorNode(Node):
         self.declare_parameter('publish_rate', 50.0)
         self.declare_parameter('traj_accel', 5.0)   # turns/s²
         self.declare_parameter('traj_decel', 5.0)   # turns/s²
+        self.declare_parameter('home_on_connect', True)
 
         channel = self.get_parameter('can_channel').value
         bustype = self.get_parameter('can_bustype').value
@@ -117,7 +126,7 @@ class GIM8108MotorNode(Node):
 
         # ── Publishers ────────────────────────────────────────────────────────
         self.pub_joint = self.create_publisher(JointState, '~/joint_state', 10)
-        self.pub_connected = self.create_publisher(Bool, '~/is_connected', 10)
+        self.pub_connected = self.create_publisher(Bool, '~/is_connected', _QOS_LATCHED)
 
         # ── Services ──────────────────────────────────────────────────────────
         self.create_service(SetBool, '~/enable', self._srv_enable)
@@ -132,6 +141,10 @@ class GIM8108MotorNode(Node):
         # ── Publish timer ─────────────────────────────────────────────────────
         rate = self.get_parameter('publish_rate').value
         self.create_timer(1.0 / rate, self._publish_state)
+
+        # ── Home on connect ───────────────────────────────────────────────────
+        if self.bus is not None and self.get_parameter('home_on_connect').value:
+            threading.Thread(target=self._home_to_origin, daemon=True).start()
 
     # ── CAN helpers ───────────────────────────────────────────────────────────
 
@@ -187,6 +200,29 @@ class GIM8108MotorNode(Node):
 
     def _update_traj_vel(self):
         self._send(CMD_SET_TRAJ_VEL_LIMIT, struct.pack('<f', self._traj_vel))
+
+    def _home_to_origin(self):
+        """CANバス接続後、自動的にクローズドループを有効化して原点(0°)へ移動する。"""
+        self.get_logger().info('Homing: waiting for first heartbeat...')
+        # ハートビートが届くまで最大5秒待つ
+        for _ in range(50):
+            time.sleep(0.1)
+            if self.axis_state != 0:
+                break
+        else:
+            self.get_logger().warn('Homing: no heartbeat received — motor may not be calibrated.')
+
+        self.get_logger().info('Homing: enabling closed-loop and moving to 0°...')
+        self._set_mode(CTRL_POSITION, INPUT_TRAP_TRAJ)
+        self._update_limits()
+        self._update_traj_vel()
+        accel = self.get_parameter('traj_accel').value
+        decel = self.get_parameter('traj_decel').value
+        self._send(CMD_SET_TRAJ_ACCEL_LIMITS, struct.pack('<ff', accel, decel))
+        self._set_axis_state(AXIS_STATE_CLOSED_LOOP_CONTROL)
+        time.sleep(0.1)
+        self._send(CMD_SET_INPUT_POS, struct.pack('<fhh', 0.0, 0, 0))
+        self.get_logger().info('Homing: command sent → 0°')
 
     # ── Subscription callbacks ─────────────────────────────────────────────────
 

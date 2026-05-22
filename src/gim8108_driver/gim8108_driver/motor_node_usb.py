@@ -49,6 +49,7 @@ class GIM8108UsbNode(Node):
         self.declare_parameter('traj_accel',      5.0)
         self.declare_parameter('traj_decel',      5.0)
         self.declare_parameter('gear_ratio',      8.0)
+        self.declare_parameter('home_on_connect', True)
 
         self.odrv = None
         self.axis = None
@@ -91,6 +92,8 @@ class GIM8108UsbNode(Node):
         self.pub_cfg_traj_vel   = self.create_publisher(Float64, '~/config/traj_vel_limit',      _QOS_LATCHED)
         self.pub_cfg_traj_accel = self.create_publisher(Float64, '~/config/traj_accel_limit',    _QOS_LATCHED)
         self.pub_cfg_traj_decel = self.create_publisher(Float64, '~/config/traj_decel_limit',    _QOS_LATCHED)
+        self.pub_cfg_vel_limit  = self.create_publisher(Float64, '~/config/vel_limit',           _QOS_LATCHED)
+        self.pub_cfg_cur_limit  = self.create_publisher(Float64, '~/config/current_lim',         _QOS_LATCHED)
 
         # Services
         self.create_service(SetBool, '~/enable',       self._srv_enable)
@@ -128,6 +131,8 @@ class GIM8108UsbNode(Node):
             self._fail_count = 0
         self.get_logger().info('ODrive connected!')
         self._publish_config()
+        if self.get_parameter('home_on_connect').value:
+            threading.Thread(target=self._home_to_origin, daemon=True).start()
 
     def _reconnect_loop(self):
         """Called automatically when reads fail; keeps retrying until success."""
@@ -148,6 +153,29 @@ class GIM8108UsbNode(Node):
             self.get_logger().info('ODrive reconnected!')
             self._publish_config()
             return
+
+    def _home_to_origin(self):
+        """接続後、自動的に原点(0°)へ移動する。"""
+        self.get_logger().info('Homing: enabling closed-loop and moving to 0°...')
+        with self._lock:
+            if not self._connected:
+                return
+            try:
+                self.axis.controller.config.control_mode = ControlMode.POSITION_CONTROL
+                self.axis.controller.config.input_mode   = InputMode.TRAP_TRAJ
+                self.axis.trap_traj.config.vel_limit    = self._traj_vel
+                self.axis.trap_traj.config.accel_limit  = self._traj_accel
+                self.axis.trap_traj.config.decel_limit  = self._traj_decel
+                self.axis.controller.config.vel_limit   = self._vel_limit
+                self.axis.motor.config.current_lim      = self._cur_limit
+                self.axis.requested_state = CLOSED_LOOP
+                time.sleep(0.1)
+                self.axis.controller.input_pos = 0.0
+                self.get_logger().info('Homing: command sent → 0°')
+            except Exception as exc:
+                self.get_logger().error(
+                    f'Homing failed (motor may not be calibrated yet): {exc}'
+                )
 
     @property
     def _connected(self) -> bool:
@@ -565,7 +593,7 @@ class GIM8108UsbNode(Node):
         self.pub_voltage.publish(v_msg)
 
     def _publish_config(self):
-        """Read actual ODrive config values and publish as latched feedback for GUI."""
+        """ODrive のフラッシュ値を読み戻してローカル変数と GUI を同期する。"""
         with self._lock:
             if not self._connected:
                 return
@@ -576,9 +604,18 @@ class GIM8108UsbNode(Node):
                 tv  = self.axis.trap_traj.config.vel_limit
                 ta  = self.axis.trap_traj.config.accel_limit
                 td  = self.axis.trap_traj.config.decel_limit
+                vl  = self.axis.controller.config.vel_limit
+                cl  = self.axis.motor.config.current_lim
             except Exception as exc:
                 self.get_logger().warn(f'Could not read config from ODrive: {exc}')
                 return
+
+        # ローカル変数を ODrive の保存値で上書き（enable/home 時に正しい値を使うため）
+        self._traj_vel   = tv
+        self._traj_accel = ta
+        self._traj_decel = td
+        self._vel_limit  = vl
+        self._cur_limit  = cl
 
         def pub(publisher, value):
             m = Float64(); m.data = float(value); publisher.publish(m)
@@ -589,9 +626,12 @@ class GIM8108UsbNode(Node):
         pub(self.pub_cfg_traj_vel,   tv)
         pub(self.pub_cfg_traj_accel, ta)
         pub(self.pub_cfg_traj_decel, td)
+        pub(self.pub_cfg_vel_limit,  vl)
+        pub(self.pub_cfg_cur_limit,  cl)
         self.get_logger().info(
-            f'Config published: pos_gain={pg:.1f} vel_gain={vg:.3f} '
-            f'vel_int={vig:.3f} traj_vel={tv:.1f} accel={ta:.1f} decel={td:.1f}'
+            f'Config synced from ODrive: pos_gain={pg:.1f} vel_gain={vg:.3f} '
+            f'vel_int={vig:.3f} traj_vel={tv:.1f} accel={ta:.1f} decel={td:.1f} '
+            f'vel_limit={vl:.1f} cur_limit={cl:.1f}'
         )
 
     def _pub_conn_if_changed(self, state: bool):
