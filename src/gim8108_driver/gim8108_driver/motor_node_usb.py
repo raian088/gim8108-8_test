@@ -55,7 +55,6 @@ class GIM8108UsbNode(Node):
 
         self.odrv = None
         self.axis = None
-        self._usb_find_path = None   # set in _connect_loop if usb_path param given
         self._lock = threading.Lock()
         self._traj_vel   = self.get_parameter('traj_vel').value
         self._traj_accel = self.get_parameter('traj_accel').value
@@ -88,6 +87,7 @@ class GIM8108UsbNode(Node):
         self.pub_conn    = self.create_publisher(Bool,        '~/is_connected', _QOS_LATCHED)
         self.pub_calib   = self.create_publisher(String,      '~/calib_status', 10)
         self.pub_voltage = self.create_publisher(Float64,     '~/bus_voltage',  10)
+        self.pub_temp    = self.create_publisher(Float64,     '~/temperature',  10)
         # Config feedback — latched so GUI gets current values even if started later
         self.pub_cfg_pos_gain   = self.create_publisher(Float64, '~/config/pos_gain',            _QOS_LATCHED)
         self.pub_cfg_vel_gain   = self.create_publisher(Float64, '~/config/vel_gain',            _QOS_LATCHED)
@@ -125,15 +125,29 @@ class GIM8108UsbNode(Node):
         sn = None
 
         if usb_path:
-            # Pass USB bus:address directly to odrive as a path filter.
-            # Format: 'usb:bus:address' e.g. 'usb:1:17' (decimal)
+            # Try to resolve USB bus:address → ODrive serial number via pyusb.
+            # If pyusb is unavailable or the descriptor is not valid hex, fall back to auto-detect.
             try:
-                bus, addr = (int(x) for x in usb_path.split(':'))
-                self._usb_find_path = f'usb:{bus}:{addr}'
-                self.get_logger().info(f'USB path filter: {self._usb_find_path}')
+                import usb.core as _usb
+                bus_num, addr_num = (int(x) for x in usb_path.split(':'))
+                devs = list(_usb.find(idVendor=0x1209, idProduct=0x0d32, find_all=True) or [])
+                for dev in devs:
+                    if dev.bus == bus_num and dev.address == addr_num:
+                        try:
+                            raw = dev.serial_number
+                            sn = int(raw, 16)
+                            self.get_logger().info(
+                                f'Resolved USB {usb_path} → serial 0x{sn:X}')
+                        except Exception:
+                            self.get_logger().warn(
+                                f'USB {usb_path} serial "{dev.serial_number}" is not hex — '
+                                'auto-detecting any ODrive')
+                        break
+                else:
+                    self.get_logger().warn(
+                        f'USB device at {usb_path} not found via pyusb — auto-detecting')
             except Exception as exc:
-                self.get_logger().warn(f'USB path parse failed ({exc}) — auto-detecting')
-                self._usb_find_path = None
+                self.get_logger().warn(f'USB path lookup failed ({exc}) — auto-detecting')
         elif sn_str:
             try:
                 sn = int(sn_str, 16)
@@ -147,10 +161,7 @@ class GIM8108UsbNode(Node):
             'make sure: usbipd attach --wsl --busid <BUSID>'
         )
         try:
-            if self._usb_find_path:
-                odrv = odrive.find_any(timeout=timeout, path=self._usb_find_path)
-            else:
-                odrv = odrive.find_any(timeout=timeout, serial_number=sn)
+            odrv = odrive.find_any(timeout=timeout, serial_number=sn)
         except Exception as exc:
             self.get_logger().error(f'ODrive connection failed: {exc}')
             return
@@ -599,7 +610,7 @@ class GIM8108UsbNode(Node):
                 # transient error → keep Connected, don't publish state
                 return
 
-            # ── Non-critical reads: current + voltage ─────────────────────────
+            # ── Non-critical reads: current + voltage + temperature ───────────
             try:
                 iq = self.axis.motor.current_control.Iq_measured
             except Exception:
@@ -608,6 +619,10 @@ class GIM8108UsbNode(Node):
                 vbus = self.odrv.vbus_voltage
             except Exception:
                 vbus = 0.0
+            try:
+                temp = self.axis.motor.fet_thermistor.temperature
+            except Exception:
+                temp = None
 
         # Successful read → publish
         self._pub_conn_if_changed(True)
@@ -624,6 +639,11 @@ class GIM8108UsbNode(Node):
         v_msg = Float64()
         v_msg.data = vbus
         self.pub_voltage.publish(v_msg)
+
+        if temp is not None:
+            t_msg = Float64()
+            t_msg.data = float(temp)
+            self.pub_temp.publish(t_msg)
 
     def _publish_config(self):
         """ODrive のフラッシュ値を読み戻してローカル変数と GUI を同期する。"""
