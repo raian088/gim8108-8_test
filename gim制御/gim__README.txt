@@ -8,3 +8,6 @@ WSL側で
 source /opt/ros/jazzy/setup.bash
   source ~/gim8108-8_test/install/setup.bash
   ros2 launch gim8108_driver start.launch.py
+
+接続できないと起用
+ros2 run gim8108_driver gim8108_motor_node --ros-args -p can_channel:=/dev/ttyACM0
