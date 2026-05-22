@@ -95,6 +95,7 @@ class GIM8108UsbNode(Node):
         self.pub_cfg_traj_decel = self.create_publisher(Float64, '~/config/traj_decel_limit',    _QOS_LATCHED)
         self.pub_cfg_vel_limit  = self.create_publisher(Float64, '~/config/vel_limit',           _QOS_LATCHED)
         self.pub_cfg_cur_limit  = self.create_publisher(Float64, '~/config/current_lim',         _QOS_LATCHED)
+        self.pub_serial         = self.create_publisher(String,  '~/serial_number',              _QOS_LATCHED)
 
         # Services
         self.create_service(SetBool, '~/enable',       self._srv_enable)
@@ -132,7 +133,9 @@ class GIM8108UsbNode(Node):
             self.odrv = odrv
             self.axis = odrv.axis0 if axis_num == 0 else odrv.axis1
             self._fail_count = 0
-        self.get_logger().info('ODrive connected!')
+        sn_hex = hex(odrv.serial_number)[2:].upper()
+        self.get_logger().info(f'ODrive connected!  Serial: {sn_hex}')
+        self.pub_serial.publish(String(data=sn_hex))
         self._publish_config()
         if self.get_parameter('home_on_connect').value:
             threading.Thread(target=self._home_to_origin, daemon=True).start()
@@ -153,7 +156,9 @@ class GIM8108UsbNode(Node):
                 self._fail_count = 0
                 self._reconnecting = False
                 self._save_in_progress = False
-            self.get_logger().info('ODrive reconnected!')
+            sn_hex = hex(odrv.serial_number)[2:].upper()
+            self.get_logger().info(f'ODrive reconnected!  Serial: {sn_hex}')
+            self.pub_serial.publish(String(data=sn_hex))
             self._publish_config()
             return
 

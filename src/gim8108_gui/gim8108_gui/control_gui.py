@@ -193,6 +193,7 @@ class MotorChannel:
     current_a: float = 0.0
     voltage_v: Optional[float] = None
     is_connected: bool = False
+    serial_number: str = ''
     _cfg: dict = field(default_factory=dict)
 
     # Callbacks (set by the detail panel)
@@ -200,6 +201,7 @@ class MotorChannel:
     on_connected: Any = None
     on_calib: Any = None
     on_config: Any = None
+    on_serial: Any = None
 
     # ROS publishers (populated by MultiGuiNode.add_channel)
     pub_pos:          Any = None
@@ -288,6 +290,8 @@ class MultiGuiNode(Node):
                                  lambda m, c=ch: self._on_connected(m, c), _QOS_LATCHED)
         self.create_subscription(String,     f'{ns}/calib_status',
                                  lambda m, c=ch: self._on_calib(m, c),     10)
+        self.create_subscription(String,     f'{ns}/serial_number',
+                                 lambda m, c=ch: self._on_serial(m, c),    _QOS_LATCHED)
         self.create_subscription(Float64,    f'{ns}/bus_voltage',
                                  lambda m, c=ch: self._on_voltage(m, c),   10)
 
@@ -329,6 +333,10 @@ class MultiGuiNode(Node):
     def _on_calib(self, msg: String, ch: MotorChannel):
         if ch.on_calib: ch.on_calib(msg.data)
 
+    def _on_serial(self, msg: String, ch: MotorChannel):
+        ch.serial_number = msg.data
+        if ch.on_serial: ch.on_serial(msg.data)
+
     def _on_cfg(self, msg: Float64, ch: MotorChannel, key: str):
         ch._cfg[key] = msg.data
         if ch.on_config: ch.on_config(key, msg.data)
@@ -337,10 +345,12 @@ class MultiGuiNode(Node):
 # ── Add Motor dialog ──────────────────────────────────────────────────────────
 
 class AddMotorDialog(QDialog):
+    _scan_done = pyqtSignal(list)   # list of serial number strings
+
     def __init__(self, parent, next_index: int):
         super().__init__(parent)
         self.setWindowTitle('Add Motor')
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(360)
 
         form = QFormLayout(self)
         form.setSpacing(10)
@@ -359,14 +369,67 @@ class AddMotorDialog(QDialog):
         self.gear_spin.setSuffix(' : 1')
         form.addRow('Gear ratio:', self.gear_spin)
 
-        self.serial_edit = QLineEdit('')
-        self.serial_edit.setPlaceholderText('e.g. 3060649C3539  (blank = auto-detect)')
-        form.addRow('USB Serial No.:', self.serial_edit)
+        # Serial number row: text field + Scan button
+        serial_row = QHBoxLayout()
+        self.serial_combo = QComboBox()
+        self.serial_combo.setEditable(True)
+        self.serial_combo.lineEdit().setPlaceholderText('blank = auto-detect')
+        self.btn_scan = QPushButton('🔍 Scan')
+        self.btn_scan.setFixedWidth(80)
+        self.btn_scan.clicked.connect(self._start_scan)
+        serial_row.addWidget(self.serial_combo, 1)
+        serial_row.addWidget(self.btn_scan)
+        form.addRow('USB Serial No.:', serial_row)
+
+        self._scan_done.connect(self._on_scan_done)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         form.addRow(btns)
+
+    def _start_scan(self):
+        self.btn_scan.setEnabled(False)
+        self.btn_scan.setText('Scanning…')
+        threading.Thread(target=self._do_scan, daemon=True).start()
+
+    def _do_scan(self):
+        try:
+            result = subprocess.run(
+                ['python3', '-c',
+                 'import odrive, sys\n'
+                 'devs = []\n'
+                 'try:\n'
+                 '  import usb.core\n'
+                 '  for d in usb.core.find(idVendor=0x1209,idProduct=0x0d32,find_all=True):\n'
+                 '    try: devs.append(usb.util.get_string(d,d.iSerialNumber))\n'
+                 '    except: pass\n'
+                 'except Exception:\n'
+                 '  pass\n'
+                 'if not devs:\n'
+                 '  import odrive\n'
+                 '  odrv = odrive.find_any(timeout=3)\n'
+                 '  devs.append(hex(odrv.serial_number)[2:].upper())\n'
+                 'print("\\n".join(devs))'],
+                capture_output=True, text=True, timeout=12
+            )
+            serials = [s.strip() for s in result.stdout.splitlines() if s.strip()]
+        except Exception:
+            serials = []
+        self._scan_done.emit(serials)
+
+    def _on_scan_done(self, serials: list):
+        self.btn_scan.setEnabled(True)
+        self.btn_scan.setText('🔍 Scan')
+        if not serials:
+            QMessageBox.information(self, 'Not found',
+                'No ODrive detected.\nMake sure it is connected:\n  usbipd attach --wsl --busid <BUSID>')
+            return
+        current = self.serial_combo.lineEdit().text()
+        self.serial_combo.clear()
+        self.serial_combo.addItems(serials)
+        if current and current not in serials:
+            self.serial_combo.lineEdit().setText(current)
 
     @property
     def motor_name(self): return self.name_edit.text().strip() or 'Motor'
@@ -375,7 +438,7 @@ class AddMotorDialog(QDialog):
     @property
     def gear_ratio(self): return self.gear_spin.value()
     @property
-    def serial_number(self): return self.serial_edit.text().strip()
+    def serial_number(self): return self.serial_combo.currentText().strip()
 
 
 # ── Motor card (left panel) ───────────────────────────────────────────────────
@@ -572,6 +635,7 @@ class MotorListPanel(QWidget):
         ch.on_connected = None
         ch.on_calib = None
         ch.on_config = None
+        ch.on_serial = None
 
         if ch.process:
             try:
@@ -601,6 +665,7 @@ class MotorDetailPanel(QWidget):
     _sig_connected = pyqtSignal()
     _sig_calib     = pyqtSignal(str)
     _sig_config    = pyqtSignal(str, float)
+    _sig_serial    = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -624,6 +689,7 @@ class MotorDetailPanel(QWidget):
         self._sig_connected.connect(self._refresh_connection)
         self._sig_calib.connect(self._on_calib_msg)
         self._sig_config.connect(self._on_config_update)
+        self._sig_serial.connect(self._on_serial_update)
 
         self._build()
         self._refresh_motion_list()
@@ -642,6 +708,7 @@ class MotorDetailPanel(QWidget):
             ch.on_connected = self._sig_connected.emit
             ch.on_calib     = self._sig_calib.emit
             ch.on_config    = self._sig_config.emit
+            ch.on_serial    = self._sig_serial.emit
         self._refresh_connection()
         self._refresh_status()
 
@@ -671,21 +738,25 @@ class MotorDetailPanel(QWidget):
 
         sep = QFrame(); sep.setFrameShape(QFrame.VLine)
 
-        self.lbl_pos  = QLabel('Angle    ---')
-        self.lbl_vel  = QLabel('Speed    ---')
-        self.lbl_cur  = QLabel('Current  ---')
-        self.lbl_vbus = QLabel('Voltage  ---')
+        self.lbl_pos    = QLabel('Angle    ---')
+        self.lbl_vel    = QLabel('Speed    ---')
+        self.lbl_cur    = QLabel('Current  ---')
+        self.lbl_vbus   = QLabel('Voltage  ---')
+        self.lbl_serial = QLabel('')
         mono = QFont('Monospace', 10)
         for lbl in (self.lbl_pos, self.lbl_vel, self.lbl_cur, self.lbl_vbus):
             lbl.setFont(mono)
             lbl.setMinimumWidth(155)
             lbl.setStyleSheet('color:#555555;')
+        self.lbl_serial.setFont(QFont('Monospace', 9))
+        self.lbl_serial.setStyleSheet('color:#3a3a3a;')
 
         h.addWidget(self.lbl_conn)
         h.addWidget(sep)
         for lbl in (self.lbl_pos, self.lbl_vel, self.lbl_cur, self.lbl_vbus):
             h.addWidget(lbl)
         h.addStretch()
+        h.addWidget(self.lbl_serial)
         return grp
 
     # ── Motor Control tab ──────────────────────────────────────────────────────
@@ -1262,6 +1333,10 @@ class MotorDetailPanel(QWidget):
             self.lbl_conn.setStyleSheet('color:#cccccc;font-weight:bold;letter-spacing:2px;')
             for lbl in (self.lbl_pos, self.lbl_vel, self.lbl_cur, self.lbl_vbus):
                 lbl.setStyleSheet('color:#cccccc;')
+            sn = self.ch.serial_number if self.ch else ''
+            if sn:
+                self.lbl_serial.setText(f'SN: {sn}')
+                self.lbl_serial.setStyleSheet('color:#555555;')
         else:
             self.lbl_conn.setText('⬤  DISCONNECTED')
             self.lbl_conn.setStyleSheet('color:#444444;font-weight:bold;letter-spacing:2px;')
@@ -1271,10 +1346,15 @@ class MotorDetailPanel(QWidget):
             self.lbl_vbus.setText('Voltage  ---')
             for lbl in (self.lbl_pos, self.lbl_vel, self.lbl_cur, self.lbl_vbus):
                 lbl.setStyleSheet('color:#555555;')
+            self.lbl_serial.setText('')
             self._stop_play()
 
     def _on_calib_msg(self, msg: str):
         self.calib_log.append(msg)
+
+    def _on_serial_update(self, sn: str):
+        self.lbl_serial.setText(f'SN: {sn}')
+        self.lbl_serial.setStyleSheet('color:#555555;')
 
     def _on_config_update(self, key: str, value: float):
         def _set(w, v):
