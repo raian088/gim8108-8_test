@@ -69,6 +69,11 @@ source install/setup.bash
 
 ## 起動方法
 
+ cd ~/gim8108-8_test
+  source /opt/ros/jazzy/setup.bash
+  source install/setup.bash
+  ros2 launch gim8108_driver start.launch.py
+
 ### USB Type-C（推奨）— ODrive を直接 USB 接続する場合
 
 ```bash
